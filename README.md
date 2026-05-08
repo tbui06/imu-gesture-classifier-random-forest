@@ -1,68 +1,32 @@
 # IMU Gesture Classifier — Random Forest
 
-Real-time hand gesture recognition using an **MSP430F5529 microcontroller**, **MPU-6050 IMU**, and a **Random Forest classifier**. Physical swipe gestures are recognized in real time and used to drive interactive applications: a gesture password system and a gesture-controlled terminal dodge game.
+The long-term goal is a low-cost wrist-worn coaching tool for badminton — something that can recognize swing technique without a camera or a human observer. This project is the first step: can a cheap IMU and a simple ML model reliably tell apart basic hand gestures in real time?
 
-> Motivation: first step toward a low-cost wrist-worn IMU coaching tool for badminton — classifying swing gestures without a camera or human observer.
+The answer is yes, with ~95% accuracy on three classes (idle, swipe left, swipe right), running live off an MSP430 microcontroller and a laptop.
 
 ---
 
-## System Pipeline
+## How it works
 
 ```
-MPU-6050 --I2C--> MSP430F5529 --UART/USB--> Python ML Pipeline --> Applications
-  (sensor)           (firmware)               (laptop)               (game / password)
+MPU-6050 --I2C--> MSP430F5529 --UART/USB--> Python ---> Applications
 ```
 
-1. MSP430 firmware reads 6-axis IMU data (ax, ay, az, gx, gy, gz) at 10 Hz over I2C
-2. Data is streamed to the laptop as CSV over USB serial at 9600 baud
-3. Python collects labeled gesture data, extracts features, and trains a Random Forest model
-4. Real-time prediction drives a gesture password system and a terminal dodge game
+The MSP430 reads 6-axis IMU data (ax, ay, az, gx, gy, gz) at 10 Hz over I2C and streams it as CSV over USB serial at 9600 baud.
+
+**The key insight for ML:** you can't label individual sensor rows — a gesture takes 1–3 seconds, not 0.1 s. So instead of labeling rows, I label *windows* of 20 consecutive rows (2 seconds). From each window I extract 7 statistics per axis (mean, std, min, max, range, abs peak, energy), giving 42 features per window. In real time, the window slides forward one row at a time, so a new prediction fires every 0.1 s.
+
+**Why Random Forest:** it works well with small datasets (~230 training samples here), rarely overfits, and gives a confidence score per prediction — useful for ignoring uncertain results. A neural network would need far more data for a 3-class problem this simple.
+
+The top features turned out to be gyroscope z-axis mean and accelerometer x-axis std. That makes sense — swiping left vs. right produces opposite wrist rotation, which shows up clearly as angular velocity along z.
 
 ---
 
-## Hardware
+## Results
 
-| Component | Details |
-|---|---|
-| Microcontroller | MSP430F5529 LaunchPad |
-| IMU Sensor | MPU-6050 (accelerometer + gyroscope) |
-| Communication | I2C (sensor to MCU), UART over USB (MCU to laptop) |
-| Clock | ~1.048576 MHz (internal DCOCLKDIV) |
-| Baud Rate | 9600 (BR0 = 109, UCBRSx = 2) |
-
-### Wiring
-
-| Signal | MPU-6050 Pin | MSP430F5529 Pin |
-|---|---|---|
-| Power | VCC | 3.3 V |
-| Ground | GND | GND |
-| I2C Data | SDA | P3.0 (UCB0SDA) |
-| I2C Clock | SCL | P3.1 (UCB0SCL) |
-| I2C Address | AD0 | GND (address = 0x68) |
-| UART TX | — | P4.4 (UCA1TXD) |
-| UART RX | — | P4.5 (UCA1RXD) |
-
----
-
-## Machine Learning
-
-### Feature Extraction
-Each gesture window = 20 consecutive sensor rows (2 seconds at 10 Hz).
-For each of the 6 sensor axes, 7 statistical features are computed:
-
-`mean, std, min, max, range, abs_peak, energy`
-
-This gives **42 features per window**, each window labeled with one gesture class.
-In real-time mode, the window slides by 1 sample, producing a new prediction every 0.1 seconds.
-
-### Classifier
-- **Model:** Random Forest (100 decision trees)
-- **Classes:** `idle`, `swipe_left`, `swipe_right`
-- **Evaluation:** 5-fold cross-validation
-- **Accuracy:** 0.948 +/- 0.084
-- **Top features:** gyroscope z-axis mean, accelerometer x-axis std — consistent with wrist rotation producing distinctive angular velocity during swipes
-
-### Dataset
+- **5-fold CV accuracy: 0.948 ± 0.084**
+- A clear swipe produces a confident prediction within ~1 second
+- Predictions below 60% confidence are suppressed
 
 | Class | Raw Rows | Training Windows |
 |---|---|---|
@@ -73,93 +37,94 @@ In real-time mode, the window slides by 1 sample, producing a new prediction eve
 
 ---
 
-## Project Structure
+## Hardware
+
+MPU-6050 on a breadboard connected to an MSP430F5529 LaunchPad via jumper wires.
+
+| Signal | MPU-6050 | MSP430F5529 |
+|---|---|---|
+| Power | VCC | 3.3 V |
+| Ground | GND | GND |
+| I2C Data | SDA | P3.0 (UCB0SDA) |
+| I2C Clock | SCL | P3.1 (UCB0SCL) |
+| I2C Address | AD0 | GND → address 0x68 |
+| UART TX | — | P4.4 (UCA1TXD) |
+
+Clock: ~1.048576 MHz internal DCOCLKDIV. UART: BR0 = 109, UCBRSx = 2 (matched to actual clock, not the nominal 1 MHz).
+
+---
+
+## Project structure
 
 ```
-.
-├── 319 Motion Sensor Collection/
-│   └── main.c               # MSP430 firmware — reads IMU, streams data over UART
-├── data_storing.py           # Collect and label gesture data into CSV files
-├── train.py                  # Extract features, train Random Forest, save model.pkl
-├── predict1.py               # Live gesture prediction from serial stream
-├── password.py               # Gesture-based password application
-├── game.py                   # Gesture-controlled terminal dodge game
-├── inspect_data.py           # Dataset inspection and outlier cleaning tool
-├── idle.csv                  # Collected training data — idle
-├── swipe_left.csv            # Collected training data — swipe left
-├── swipe_right.csv           # Collected training data — swipe right
-└── model.pkl                 # Trained Random Forest model
+msp430_firmware/main.c   — reads IMU over I2C, streams CSV over UART
+data_storing.py          — collect and label gesture data into CSV files
+inspect_data.py          — scan CSVs for outliers, clean interactively
+train.py                 — extract features, train Random Forest, save model.pkl
+predict1.py              — live gesture prediction from serial stream
+password.py              — gesture-based password app (4-gesture sequence)
+game.py                  — gesture-controlled terminal dodge game
 ```
 
 ---
 
-## How to Run
+## How to run
 
-### 1. Flash the Firmware
-Open `319 Motion Sensor Collection/` in **Code Composer Studio** and flash `main.c` to the MSP430F5529. The board will immediately start streaming sensor data over USB.
+**1. Flash firmware**
 
-### 2. Install Python Dependencies
+Open `msp430_firmware/` in Code Composer Studio and flash `main.c` to the MSP430F5529.
+
+**2. Install dependencies**
+
 ```bash
 pip install pyserial numpy pandas scikit-learn joblib
 ```
 
-### 3. Collect Gesture Data
+**3. Collect data**
+
 ```bash
 python data_storing.py
 ```
-Enter a label (`swipe_left`, `swipe_right`, or `idle`) and follow the prompts. Repeat for each gesture class. More repetitions = better model.
 
-### 4. Train the Model
+Enter a label (`idle`, `swipe_left`, `swipe_right`), press Enter before each rep, perform the gesture. Repeat until you have enough reps per class.
+
+**4. Train**
+
 ```bash
 python train.py
 ```
-Outputs `model.pkl` and prints cross-validation accuracy and top feature importances.
 
-### 5. Test Live Prediction
+Prints cross-validation accuracy and top feature importances, saves `model.pkl`.
+
+**5. Run live prediction**
+
 ```bash
 python predict1.py
 ```
-Prints the predicted gesture and confidence score in real time as you move the sensor.
 
-### 6. Play the Dodge Game
+**6. Run the apps**
+
 ```bash
-python game.py
+python password.py   # gesture password
+python game.py       # terminal dodge game
 ```
-Swipe left or right physically to move the player and dodge falling obstacles.
 
-> **Note:** Update the `PORT` variable in each Python script to match your system (e.g., `/dev/cu.usbmodem1203` on macOS).
-
----
-
-## Key Bugs Resolved
-
-| Bug | Symptom | Fix |
-|---|---|---|
-| UART baud mismatch | Garbled or no serial output | Recalculated divider for actual 1,048,576 Hz clock (BR0=109); rewrote clock init to set all fields explicitly |
-| I2C NACK / firmware hang | MPU-6050 not responding, firmware froze | Swapped SDA/SCL wires; added NACK detection to return error instead of looping forever |
-| Serial buffer contamination | Old idle data saved instead of fresh gesture | Continuously drain serial buffer while waiting for Enter keypress |
-| Duplicate repetition IDs | Training windows collided across sessions | Script now reads existing CSV and continues rep numbering from last value |
+> Update the `PORT` variable in each script to match your system (e.g., `/dev/cu.usbmodem1203` on macOS).
 
 ---
 
-## Dependencies
+## Bugs that took the most time
 
-| Library | Purpose |
-|---|---|
-| `pyserial` | Serial port communication |
-| `numpy` | Feature computation |
-| `pandas` | CSV loading and manipulation |
-| `scikit-learn` | RandomForestClassifier, cross_val_score |
-| `joblib` | Save/load model.pkl |
-| `curses` (stdlib) | Terminal game rendering |
-| `threading` (stdlib) | Background gesture thread in game and password |
+**UART baud mismatch** — no serial output, or garbled data. The baud divider was calculated for exactly 1 MHz, but the actual clock is 1,048,576 Hz. Also, setting only one clock register accidentally switched other clocks to 32 kHz. Fixed by recalculating BR0 = 109 and setting all clock fields explicitly.
+
+**I2C NACK / firmware hang** — MPU-6050 not responding, firmware froze in a loop waiting for an ACK that never came. SDA and SCL were swapped. Fixed the wiring and added NACK detection so the firmware fails gracefully instead of hanging.
+
+**Serial buffer contamination** — data collection was saving stale idle data instead of the fresh gesture. The MSP430 streams continuously, so the laptop's serial buffer fills up while waiting for Enter. Fixed by continuously draining the buffer during the wait, so recording starts clean.
+
+**Duplicate repetition IDs** — restarting a collection session reset rep numbering to zero, causing ID collisions in the CSV. Fixed by reading the existing CSV on startup and continuing numbering from the last value.
 
 ---
 
-## References
+## Limitations
 
-1. InvenSense. *MPU-6000 and MPU-6050 Product Specification*, Rev. 3.4. TDK InvenSense, 2013.
-2. Texas Instruments. *MSP430F5529 LaunchPad User's Guide*. Texas Instruments, 2013.
-3. Texas Instruments. *MSP430x5xx and MSP430x6xx Family User's Guide (SLAU208)*. ti.com.
-4. Scikit-learn Developers. *Random Forests — scikit-learn documentation*. scikit-learn.org.
-5. Breiman, L. Random Forests. *Machine Learning*, vol. 45, no. 1, pp. 5–32, 2001.
+Only 2 active gesture classes (plus idle). Adding more gestures would need significantly more training data and would increase classification difficulty. The accelerometer is also sensitive to sensor tilt — if the orientation at inference time differs from training, accuracy drops. A gravity-removal step (high-pass filter or calibration) would help.
