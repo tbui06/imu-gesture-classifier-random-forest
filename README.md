@@ -1,8 +1,6 @@
 # IMU Gesture Classifier — Random Forest
 
-The long-term goal is a low-cost wrist-worn coaching tool for badminton — something that can recognize swing technique without a camera or a human observer. This project is the first step: can a cheap IMU and a simple ML model reliably tell apart basic hand gestures in real time?
-
-The answer is yes, with ~95% accuracy on three classes (idle, swipe left, swipe right), running live off an MSP430 microcontroller and a laptop.
+The long-term goal of this project is to build a low-cost personal coaching tool for badminton. An IMU worn on the wrist can capture swing motion data for machine learning models, without a camera (expensive) or human observer. If the system can classify different swing gestures reliably, it could eventually provide real-time feedback on technique and consistency. This project is the first step toward that goal: demonstrating that basic hand gestures can be recognized from raw IMU data in real time. Specifically, I investigated whether an MSP430F5529 microcontroller, an MPU-6050 IMU, and a simple machine learning pipeline can reliably distinguish three gestures: idle, swipe left, and swipe right.
 
 ---
 
@@ -12,7 +10,7 @@ The answer is yes, with ~95% accuracy on three classes (idle, swipe left, swipe 
 MPU-6050 --I2C--> MSP430F5529 --UART/USB--> Python ---> Applications
 ```
 
-The MSP430 reads 6-axis IMU data (ax, ay, az, gx, gy, gz) at 10 Hz over I2C and streams it as CSV over USB serial at 9600 baud.
+The MSP430 reads 6-axis IMU data (ax, ay, az, gx, gy, gz) at 10 Hz over I2C and streams it as CSV over USB serial at 9600 baud (sending one sample every 0.1 seconds).
 
 **The key insight for ML:** you can't label individual sensor rows — a gesture takes 1–3 seconds, not 0.1 s. So instead of labeling rows, I label *windows* of 20 consecutive rows (2 seconds). From each window I extract 7 statistics per axis (mean, std, min, max, range, abs peak, energy), giving 42 features per window. In real time, the window slides forward one row at a time, so a new prediction fires every 0.1 s.
 
