@@ -1,4 +1,4 @@
-# IMU Gesture Classifier — Random Forest
+# IMU Gesture Classifier with Random Forest
 
 The long-term goal of this project is to build a low-cost personal coaching tool for badminton. An IMU worn on the wrist can capture swing motion data for machine learning models, without a camera (expensive) or human observer. If the system can classify different swing gestures reliably, it could eventually provide real-time feedback on technique and consistency. This project is the first step toward that goal: demonstrating that basic hand gestures can be recognized from raw IMU data in real time. Specifically, I investigated whether an MSP430F5529 microcontroller, an MPU-6050 IMU, and a simple machine learning pipeline can reliably distinguish three gestures: idle, swipe left, and swipe right.
 
