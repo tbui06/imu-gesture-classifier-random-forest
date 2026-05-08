@@ -1,0 +1,268 @@
+#include <msp430.h>
+#include <stdint.h>
+#include <stdio.h>
+
+#define MPU6050_ADDR      0x68
+#define PWR_MGMT_1        0x6B
+#define ACCEL_XOUT_H      0x3B
+
+void clock_init(void);
+void uart_init(void);
+void uart_send_char(char c);
+void uart_send_string(const char *s);
+void uart_send_int16(int16_t x);
+void delay_ms(unsigned int ms);
+
+void i2c_init(void);
+int  i2c_write_reg(uint8_t reg, uint8_t value);
+int  i2c_read_bytes(uint8_t startReg, uint8_t *data, uint8_t len);
+
+void mpu6050_init(void);
+int  mpu6050_read_raw(int16_t *ax, int16_t *ay, int16_t *az,
+                      int16_t *gx, int16_t *gy, int16_t *gz);
+void i2c_scan(void);
+
+int main(void)
+{
+    WDTCTL = WDTPW | WDTHOLD;   // Stop watchdog
+
+    clock_init();
+    uart_init();
+    uart_send_string("UART OK\r\n");
+    delay_ms(200);
+    i2c_init();
+    mpu6050_init();
+
+    int16_t ax, ay, az, gx, gy, gz;
+
+    uart_send_string("ax,ay,az,gx,gy,gz\r\n");
+
+    while (1)
+    {
+        int result = mpu6050_read_raw(&ax, &ay, &az, &gx, &gy, &gz);
+
+        if (result != 0) {
+            uart_send_string("READ FAIL\r\n");
+        } else {
+            uart_send_int16(ax); uart_send_char(',');
+            uart_send_int16(ay); uart_send_char(',');
+            uart_send_int16(az); uart_send_char(',');
+            uart_send_int16(gx); uart_send_char(',');
+            uart_send_int16(gy); uart_send_char(',');
+            uart_send_int16(gz); uart_send_string("\r\n");
+        }
+
+        delay_ms(100);
+    }
+}
+
+void clock_init(void)
+{
+    // FLL reference = REFOCLK (32768 Hz, internal, always available)
+    UCSCTL3 = SELREF__REFOCLK;
+
+    // CRITICAL: use assignment with ALL three fields explicitly set.
+    // A plain "= SELA__REFOCLK" zeros SELS and SELM, switching
+    // SMCLK/MCLK from DCO (~1 MHz) to XT1 (32768 Hz) — that breaks
+    // the UART baud rate (104 divider gives 315 baud instead of 9600).
+    UCSCTL4 = SELA__REFOCLK       // ACLK  = REFOCLK  (32768 Hz)
+            | SELS__DCOCLKDIV     // SMCLK = DCOCLKDIV (~1 MHz default)
+            | SELM__DCOCLKDIV;    // MCLK  = DCOCLKDIV (~1 MHz default)
+}
+
+void uart_init(void)
+{
+    // UCA1 on P4.4 = TXD, P4.5 = RXD
+    P4SEL |= BIT4 | BIT5;
+
+    UCA1CTL1 |= UCSWRST;
+    UCA1CTL1 |= UCSSEL_2;       // SMCLK
+
+    // SMCLK = 1,048,576 Hz (DCOCLKDIV with FLLD=1, FLLN=31, REFOCLK ref)
+    // 1,048,576 / 9600 = 109.226 -> BR=109, UCBRSx=2
+    UCA1BR0 = 109;
+    UCA1BR1 = 0;
+    UCA1MCTL = UCBRS_2 | UCBRF_0;
+
+    UCA1CTL1 &= ~UCSWRST;
+}
+
+void uart_send_char(char c)
+{
+    while (!(UCA1IFG & UCTXIFG));
+    UCA1TXBUF = c;
+}
+
+void uart_send_string(const char *s)
+{
+    while (*s)
+    {
+        uart_send_char(*s++);
+    }
+}
+
+void uart_send_int16(int16_t x)
+{
+    char buf[12];
+    snprintf(buf, sizeof(buf), "%d", x);
+    uart_send_string(buf);
+}
+
+void i2c_init(void)
+{
+    // UCB0 I2C on P3.0 = SCL, P3.1 = SDA
+    P3SEL |= BIT0 | BIT1;
+
+    UCB0CTL1 |= UCSWRST;                 // hold USCI in reset
+    UCB0CTL0 = UCMST | UCMODE_3 | UCSYNC; // master, I2C, synchronous
+    UCB0CTL1 = UCSSEL_2 | UCSWRST;       // SMCLK, keep reset
+    UCB0BR0 = 10;                        // slow and safe
+    UCB0BR1 = 0;
+    UCB0I2CSA = MPU6050_ADDR;            // slave address
+    UCB0CTL1 &= ~UCSWRST;                // release reset
+}
+
+int i2c_write_reg(uint8_t reg, uint8_t value)
+{
+    while (UCB0CTL1 & UCTXSTP);
+    UCB0IFG &= ~UCNACKIFG;
+    UCB0CTL1 |= UCTR | UCTXSTT;          // TX mode, start
+
+    while (!(UCB0IFG & UCTXIFG)) {
+        if (UCB0IFG & UCNACKIFG) { UCB0CTL1 |= UCTXSTP; return -1; }
+    }
+    UCB0TXBUF = reg;
+
+    while (!(UCB0IFG & UCTXIFG)) {
+        if (UCB0IFG & UCNACKIFG) { UCB0CTL1 |= UCTXSTP; return -1; }
+    }
+    UCB0TXBUF = value;
+
+    while (!(UCB0IFG & UCTXIFG)) {
+        if (UCB0IFG & UCNACKIFG) { UCB0CTL1 |= UCTXSTP; return -1; }
+    }
+    UCB0CTL1 |= UCTXSTP;
+    while (UCB0CTL1 & UCTXSTP);
+    return 0;
+}
+
+int i2c_read_bytes(uint8_t startReg, uint8_t *data, uint8_t len)
+{
+    uint8_t i;
+
+    while (UCB0CTL1 & UCTXSTP);
+    UCB0IFG &= ~UCNACKIFG;
+
+    // Write register address first
+    UCB0CTL1 |= UCTR | UCTXSTT;
+    while (!(UCB0IFG & UCTXIFG)) {
+        if (UCB0IFG & UCNACKIFG) { UCB0CTL1 |= UCTXSTP; return -1; }
+    }
+    UCB0TXBUF = startReg;
+    while (!(UCB0IFG & UCTXIFG)) {
+        if (UCB0IFG & UCNACKIFG) { UCB0CTL1 |= UCTXSTP; return -1; }
+    }
+
+    // Repeated start, switch to RX
+    UCB0CTL1 &= ~UCTR;
+    UCB0CTL1 |= UCTXSTT;
+
+    while (UCB0CTL1 & UCTXSTT) {  // wait for address phase done
+        if (UCB0IFG & UCNACKIFG) { UCB0CTL1 |= UCTXSTP; return -1; }
+    }
+
+    for (i = 0; i < len; i++)
+    {
+        if (i == len - 1)
+        {
+            UCB0CTL1 |= UCTXSTP;  // stop before last byte
+        }
+        while (!(UCB0IFG & UCRXIFG));
+        data[i] = UCB0RXBUF;
+    }
+
+    while (UCB0CTL1 & UCTXSTP);
+    return 0;
+}
+
+void mpu6050_init(void)
+{
+    delay_ms(100);
+    if (i2c_write_reg(PWR_MGMT_1, 0x00) != 0)
+        uart_send_string("MPU6050 NACK - check wiring\r\n");
+    else
+        uart_send_string("MPU6050 OK\r\n");
+    delay_ms(100);
+}
+
+int mpu6050_read_raw(int16_t *ax, int16_t *ay, int16_t *az,
+                      int16_t *gx, int16_t *gy, int16_t *gz)
+{
+    uint8_t buf[14];
+
+    if (i2c_read_bytes(ACCEL_XOUT_H, buf, 14) != 0) return -1;
+
+    *ax = (int16_t)((buf[0] << 8) | buf[1]);
+    *ay = (int16_t)((buf[2] << 8) | buf[3]);
+    *az = (int16_t)((buf[4] << 8) | buf[5]);
+
+    *gx = (int16_t)((buf[8] << 8) | buf[9]);
+    *gy = (int16_t)((buf[10] << 8) | buf[11]);
+    *gz = (int16_t)((buf[12] << 8) | buf[13]);
+    return 0;
+}
+
+void delay_ms(unsigned int ms)
+{
+    while (ms--)
+    {
+        __delay_cycles(1049);   // ~1 ms at 1,048,576 Hz MCLK
+    }
+}
+
+static void uart_send_hex(uint8_t val)
+{
+    const char hex[] = "0123456789ABCDEF";
+    uart_send_string("0x");
+    uart_send_char(hex[val >> 4]);
+    uart_send_char(hex[val & 0x0F]);
+}
+
+void i2c_scan(void)
+{
+    uint8_t addr;
+    int found = 0;
+
+    uart_send_string("I2C scan...\r\n");
+
+    for (addr = 1; addr < 127; addr++)
+    {
+        UCB0I2CSA = addr;
+        UCB0IFG &= ~UCNACKIFG;
+
+        while (UCB0CTL1 & UCTXSTP);
+        UCB0CTL1 |= UCTR | UCTXSTT;
+
+        delay_ms(2);
+
+        if (UCB0IFG & UCNACKIFG) {
+            UCB0CTL1 |= UCTXSTP;
+            while (UCB0CTL1 & UCTXSTP);
+        } else {
+            UCB0CTL1 |= UCTXSTP;
+            while (UCB0CTL1 & UCTXSTP);
+            uart_send_string("Found: ");
+            uart_send_hex(addr);
+            uart_send_string("\r\n");
+            found = 1;
+        }
+
+        UCB0IFG &= ~UCNACKIFG;
+        delay_ms(5);
+    }
+
+    if (!found)
+        uart_send_string("No I2C devices found\r\n");
+    else
+        uart_send_string("Scan done\r\n");
+}
